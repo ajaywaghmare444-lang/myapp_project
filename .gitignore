@@ -1,0 +1,20 @@
+# Environment variables / secrets
+.env
+
+# Python caching
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environments
+.env/
+venv/
+ENV/
+env/
+
+# IDE / Editor configuration
+.vscode/
+.idea/
+.agents/
+.gemini/

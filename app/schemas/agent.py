@@ -12,7 +12,7 @@ class QuestionRequest(BaseModel):
         description="Optional system instruction to guide the persona or behavior of the agent."
     )
     temperature: Optional[float] = Field(
-        default=0.7,
+        default=1,
         description="Controls the randomness of the model's output. Must be between 0.0 and 2.0.",
         ge=0.0,
         le=2.0

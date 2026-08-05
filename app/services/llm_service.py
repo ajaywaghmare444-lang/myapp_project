@@ -3,7 +3,8 @@ import json
 import logging
 from typing import Optional
 
-from openai import AsyncOpenAI
+from agent_framework import Agent, FunctionTool
+from agent_framework.openai import OpenAIChatClient
 from app.config import settings
 from app.services.mcp_service import mcp_service
 
@@ -20,121 +21,84 @@ class LLMService:
             self.api_key = os.environ.get("OPENAI_API_KEY")
 
         self.model_name = settings.MODEL_NAME
-        self._client: Optional[AsyncOpenAI] = None
-
-    @property
-    def client(self) -> AsyncOpenAI:
-        if self._client is None:
-            if not self.api_key:
-                raise ValueError(
-                    "OpenAI API key is missing. Please set the OPENAI_API_KEY environment variable "
-                    "or configure it in your .env file. You can obtain one from the OpenAI Platform."
-                )
-            # Configure production client with standard timeouts and auto-retries
-            self._client = AsyncOpenAI(
-                api_key=self.api_key,
-                base_url=settings.OPENAI_API_BASE,
-                timeout=30.0,
-                max_retries=3
-            )
-        return self._client
 
     async def ask_question(
         self,
         prompt: str,
         system_instruction: str = "You are a helpful assistant.",
-        temperature: float = 1
+        temperature: float = 1.0
     ) -> str:
         """
-        Sends the user query/prompt to the OpenAI model and handles Atlassian MCP tool execution in a loop.
+        Sends the user query/prompt to the OpenAI model using the Microsoft Agent Framework.
         """
         if not prompt.strip():
             raise ValueError("Prompt cannot be empty or whitespace-only.")
 
-        # Accessing self.client triggers API key verification
-        client = self.client
-
-        # Initialize messages list for LLM context
-        messages = [
-            {"role": "system", "content": system_instruction},
-            {"role": "user", "content": prompt}
-        ]
-
-        # Prevent infinite loop cases (safety ceiling)
-        max_iterations = 8
+        if not self.api_key:
+            raise ValueError(
+                "OpenAI API key is missing. Please set the OPENAI_API_KEY environment variable "
+                "or configure it in your .env file. You can obtain one from the OpenAI Platform."
+            )
 
         try:
-            for iteration in range(max_iterations):
-                # Retrieve mapped tools from the active Atlassian MCP service
-                openai_tools = await mcp_service.get_openai_tools()
+            # 1. Retrieve current MCP tools
+            openai_tools = await mcp_service.get_openai_tools()
 
-                request_kwargs = dict(
-                    model=self.model_name,
-                    messages=messages,
+            # 2. Build FunctionTool wrappers for each MCP tool
+            agent_tools = []
+            
+            def make_mcp_wrapper(name: str):
+                async def wrapper(**kwargs):
+                    logger.info(f"Executing MCP tool '{name}' with arguments {kwargs}")
+                    return await mcp_service.call_tool(name, kwargs)
+                return wrapper
+
+            for tool_dict in openai_tools:
+                fn_info = tool_dict["function"]
+                tool_name = fn_info["name"]
+                tool_desc = fn_info["description"]
+                tool_params = fn_info["parameters"]
+
+                f_tool = FunctionTool(
+                    name=tool_name,
+                    description=tool_desc,
+                    func=make_mcp_wrapper(tool_name),
+                    input_model=tool_params
                 )
-                if temperature != 1.0:
-                    request_kwargs["temperature"] = temperature
-                if openai_tools:
-                    request_kwargs["tools"] = openai_tools
-                    request_kwargs["tool_choice"] = "auto"
+                agent_tools.append(f_tool)
 
-                # Request response/actions from LLM
-                response = await client.chat.completions.create(**request_kwargs)
-                
-                if not response.choices or not response.choices[0].message:
-                    return "The agent did not generate any text response."
-                
-                assistant_message = response.choices[0].message
-                
-                # Format assistant message for history
-                message_dict = {
-                    "role": "assistant",
-                    "content": assistant_message.content
-                }
-                if assistant_message.tool_calls:
-                    message_dict["tool_calls"] = [
-                        {
-                            "id": tc.id,
-                            "type": tc.type,
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments
-                            }
-                        } for tc in assistant_message.tool_calls
-                    ]
-                
-                messages.append(message_dict)
+            # 3. Create OpenAIChatClient
+            client = OpenAIChatClient(
+                model=self.model_name,
+                api_key=self.api_key,
+                base_url=settings.OPENAI_API_BASE
+            )
 
-                # If no tool calls are requested, we're done and can return the response text
-                if not assistant_message.tool_calls:
-                    return assistant_message.content or "Action completed."
+            # 4. Initialize Agent
+            agent = Agent(
+                client=client,
+                name="AtlassianMCPInterpreter",
+                instructions=system_instruction,
+                tools=agent_tools
+            )
 
-                # Execute requested tools
-                for tool_call in assistant_message.tool_calls:
-                    tool_name = tool_call.function.name
-                    try:
-                        args = json.loads(tool_call.function.arguments)
-                    except Exception as e:
-                        logger.error(f"Error parsing tool arguments for {tool_name}: {e}")
-                        args = {}
+            # 5. Run agent with options
+            options = {}
+            if temperature != 1.0:
+                options["temperature"] = temperature
 
-                    logger.info(f"Executing MCP tool call: {tool_name} with args {args}")
-                    try:
-                        tool_result = await mcp_service.call_tool(tool_name, args)
-                    except Exception as e:
-                        logger.error(f"Error executing tool '{tool_name}': {e}", exc_info=True)
-                        tool_result = f"Error executing tool '{tool_name}': {e}"
+            try:
+                response = await agent.run(prompt, options=options)
+            except Exception as e:
+                if "temperature" in str(e).lower() and ("not supported" in str(e).lower() or "unsupported" in str(e).lower()):
+                    logger.warning("Temperature parameter is not supported by this model. Retrying without temperature.")
+                    if "temperature" in options:
+                        del options["temperature"]
+                    response = await agent.run(prompt, options=options)
+                else:
+                    raise e
 
-                    # Append tool result to context
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "name": tool_name,
-                        "content": tool_result
-                    })
-
-            logger.warning(f"Safety turn limit of {max_iterations} reached in ask_question. Halting loop.")
-            return f"Agent execution paused after reaching safety limit of {max_iterations} turns. Please refine your query."
+            return response.text or "Action completed."
 
         except Exception as e:
             error_str = str(e)
@@ -142,6 +106,96 @@ class LLMService:
                 raise ValueError("The provided OpenAI API key is invalid or unauthorized. Please verify your OPENAI_API_KEY.")
             raise Exception(f"OpenAI API error: {error_str}")
 
+    async def create_story_in_jira(
+        self,
+        project_key: str,
+        summary: str,
+        description: str,
+        priority: str,
+        story_points: Optional[int]
+    ) -> str:
+        """
+        Uses the Microsoft Agent Framework to create a JIRA issue for the user story.
+        """
+        if not self.api_key:
+            raise ValueError(
+                "OpenAI API key is missing. Please set the OPENAI_API_KEY environment variable "
+                "or configure it in your .env file."
+            )
+
+        prompt = f"""
+        Please create a new JIRA issue of type 'Story' with the following details:
+        - Project Key: {project_key}
+        - Summary: {summary}
+        - Description: {description}
+        - Priority: {priority}
+        - Story Points: {story_points}
+        
+        You must call the appropriate tool `jira_create_issue` to execute this action.
+        Pass the priority and story points in the `additional_fields` parameter of the tool if needed (e.g. {{"priority": {{"name": "{priority}"}}, "customfield_story_points": {story_points}}}).
+        
+        CRITICAL: If the 'Story' issue type is not supported in the target project, check the available issue types using `jira_get_project_issue_types` and automatically fall back to creating the issue as a 'Task' or another general task/issue type available in that project. Do not ask the user for confirmation; proceed autonomously with the fallback.
+        
+        After calling the tool, summarize the created issue key and confirm it was created successfully.
+        """
+
+        system_instruction = (
+            "You are a helpful Jira automation assistant. You have access to Jira MCP tools. "
+            "Your main task is to call Jira tools (like `jira_create_issue`) to perform actions on behalf of the user."
+        )
+
+        try:
+            # 1. Retrieve current MCP tools
+            openai_tools = await mcp_service.get_openai_tools()
+
+            # 2. Build FunctionTool wrappers for each MCP tool
+            agent_tools = []
+            
+            def make_mcp_wrapper(name: str):
+                async def wrapper(**kwargs):
+                    logger.info(f"Executing MCP tool '{name}' with arguments {kwargs}")
+                    return await mcp_service.call_tool(name, kwargs)
+                return wrapper
+
+            for tool_dict in openai_tools:
+                fn_info = tool_dict["function"]
+                tool_name = fn_info["name"]
+                tool_desc = fn_info["description"]
+                tool_params = fn_info["parameters"]
+
+                f_tool = FunctionTool(
+                    name=tool_name,
+                    description=tool_desc,
+                    func=make_mcp_wrapper(tool_name),
+                    input_model=tool_params
+                )
+                agent_tools.append(f_tool)
+
+            # 3. Create OpenAIChatClient
+            client = OpenAIChatClient(
+                model=self.model_name,
+                api_key=self.api_key,
+                base_url=settings.OPENAI_API_BASE
+            )
+
+            # 4. Initialize Agent
+            agent = Agent(
+                client=client,
+                name="AtlassianMCPInterpreter",
+                instructions=system_instruction,
+                tools=agent_tools
+            )
+
+            # 5. Run agent
+            response = await agent.run(prompt)
+            return response.text or "Action completed."
+
+        except Exception as e:
+            logger.error(f"Error in create_story_in_jira agent run: {e}", exc_info=True)
+            raise Exception(f"MAF JIRA Agent failed to create story: {str(e)}")
+
 # Injectable dependency helper
 def get_llm_service() -> LLMService:
     return LLMService()
+
+

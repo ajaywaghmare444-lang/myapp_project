@@ -31,3 +31,43 @@ class AnswerResponse(BaseModel):
         default="success",
         description="Status indicator of the response."
     )
+
+class CreateStoryRequest(BaseModel):
+    project_key: str = Field(
+        ...,
+        description="The JIRA project key (e.g. 'FS').",
+        example="FS"
+    )
+    summary: str = Field(
+        ...,
+        description="The summary or title of the user story.",
+        example="Create User Checkout Page"
+    )
+    description: str = Field(
+        ...,
+        description="The detailed description of the user story, including acceptance criteria.",
+        example="As a customer, I want to..."
+    )
+    priority: Optional[str] = Field(
+        default="Medium",
+        description="Business priority (Low, Medium, High, Critical)."
+    )
+    story_points: Optional[int] = Field(
+        default=None,
+        description="Optional story points estimation."
+    )
+
+class CreateStoryResponse(BaseModel):
+    issue_key: str = Field(
+        ...,
+        description="The key of the created JIRA issue (e.g., 'FS-123')."
+    )
+    issue_url: str = Field(
+        ...,
+        description="The URL to view the created JIRA issue."
+    )
+    status: str = Field(
+        default="success",
+        description="Status of the operation."
+    )
+

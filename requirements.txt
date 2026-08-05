@@ -7,3 +7,4 @@ python-dotenv>=1.0.1
 mcp>=1.1.2
 mcp-atlassian>=0.22.1
 gunicorn>=21.2.0
+agent-framework>=1.11.0

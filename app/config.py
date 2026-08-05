@@ -21,6 +21,12 @@ class Settings(BaseSettings):
     ATLASSIAN_EMAIL: Optional[str] = None
     ATLASSIAN_API_TOKEN: Optional[str] = None
 
+    # Azure AI Search Settings
+    AZURE_SEARCH_ENDPOINT: Optional[str] = None
+    AZURE_SEARCH_INDEX_NAME: Optional[str] = None
+    AZURE_SEARCH_API_KEY: Optional[str] = None
+    AZURE_SEARCH_TOP_K: int = 5
+
     # Use dotenv to load environment variables for local development
     model_config = SettingsConfigDict(
         env_file=".env",

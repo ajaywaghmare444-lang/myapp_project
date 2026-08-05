@@ -13,15 +13,23 @@ async def ask_agent(
     Send a prompt/question to the agent and receive a structured answer using OpenAI GPT LLM.
     """
     try:
-        answer = await llm_service.ask_question(
+        result = await llm_service.ask_question(
             prompt=request.prompt,
             system_instruction=request.system_instruction,
             temperature=request.temperature
         )
-        return AnswerResponse(
-            answer=answer,
-            model_used=llm_service.model_name
-        )
+        if isinstance(result, dict):
+            return AnswerResponse(
+                answer=result.get("answer", ""),
+                model_used=llm_service.model_name,
+                token_usage=result.get("token_usage"),
+                agent_history=result.get("agent_history", [])
+            )
+        else:
+            return AnswerResponse(
+                answer=str(result),
+                model_used=llm_service.model_name
+            )
     except ValueError as ve:
         # e.g., missing API key or bad inputs
         raise HTTPException(status_code=400, detail=str(ve))
